@@ -167,26 +167,40 @@ install_dependencies() {
     return 0
 }
 
-# Step 3: Verify main.py exists
+# Step 3: Verify the entry point exists
+#
+# Two supported layouts:
+#   * source checkout (dev repo):  $OPENWRT_DIR/main.py
+#   * compiled dist (openwrt-agent): $OPENWRT_DIR/py<major><minor>/main.pyc
+#
+# run_main.sh at boot picks the right one; here we just need to confirm
+# at least one entry point is present before we generate the wrapper.
 verify_main_py() {
-    print_step "Step 3: Verifying main.py"
-    
-    if [ ! -f "$OPENWRT_DIR/main.py" ]; then
-        print_error "main.py not found at $OPENWRT_DIR/main.py"
-        print_info "Please ensure main.py is located at $OPENWRT_DIR/main.py"
-        exit 1
+    print_step "Step 3: Verifying entry point"
+
+    if [ -f "$OPENWRT_DIR/main.py" ]; then
+        print_success "Source entry point found: $OPENWRT_DIR/main.py"
+        return 0
     fi
-    
-    print_success "main.py found at $OPENWRT_DIR/main.py"
-    
-    # Check if main.py is executable (optional)
-    if [ -x "$OPENWRT_DIR/main.py" ]; then
-        print_info "main.py is executable"
-    else
-        print_info "main.py is not executable (this is OK)"
+
+    # Compiled dist — look for the pyver subdir that matches the local Python.
+    local pyver
+    pyver=$("$PYTHON" -c 'import sys;print(f"py{sys.version_info.major}{sys.version_info.minor}")' 2>/dev/null)
+    if [ -n "$pyver" ] && [ -f "$OPENWRT_DIR/$pyver/main.pyc" ]; then
+        print_success "Compiled entry point found: $OPENWRT_DIR/$pyver/main.pyc"
+        return 0
     fi
-    
-    return 0
+
+    # Nothing usable. Report both search paths so the operator can see
+    # what layout was expected.
+    print_error "No entry point found. Searched:"
+    print_info "  - $OPENWRT_DIR/main.py                (source checkout)"
+    print_info "  - $OPENWRT_DIR/$pyver/main.pyc  (compiled dist for Python $pyver)"
+    if [ -d "$OPENWRT_DIR" ]; then
+        print_info "  Available bytecode subdirs:"
+        ls -d "$OPENWRT_DIR"/py* 2>/dev/null | sed 's|.*/|    - |' || print_info "    (none)"
+    fi
+    exit 1
 }
 
 # Step 4: Create OpenWrt directory if needed
