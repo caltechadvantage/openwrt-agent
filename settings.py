@@ -97,7 +97,28 @@ BONDIX_SERVER_USER = os.environ.get("BONDIX_SERVER_USER", "prometheus")
 BONDIX_SERVER_PASS = os.environ.get("BONDIX_SERVER_PASS")
 BONDIX_SERVER_TIMEOUT = 10
 
+# Per-deployment overrides. Two supported locations, applied in order
+# so the persistent per-device config dir wins when both exist:
+#   1. local_settings.py at the repo root (resolved via PYTHONPATH, which
+#      setup_code.sh exports to the code dir).
+#   2. ~/.openwrt/local_settings.py (the persistent config dir alongside
+#      config.json). Historically the docs and error messages pointed
+#      operators here, but a bare ``import`` never resolved it — this
+#      block makes that documented location actually work.
 try:
-    from local_settings import *
+    from local_settings import *  # noqa: F401,F403 (repo-root override)
 except ImportError:
     pass
+
+_LOCAL_SETTINGS_PATH = os.path.join(ROOT_DIR, "local_settings.py")
+if os.path.exists(_LOCAL_SETTINGS_PATH):
+    try:
+        _overrides: dict = {}
+        with open(_LOCAL_SETTINGS_PATH, "r") as _f:
+            exec(compile(_f.read(), _LOCAL_SETTINGS_PATH, "exec"), _overrides)
+        # Mirror ``from x import *`` semantics: only public names.
+        globals().update(
+            {k: v for k, v in _overrides.items() if not k.startswith("_")}
+        )
+    except Exception as _e:
+        print(f"Warning: failed to load {_LOCAL_SETTINGS_PATH}: {_e}")

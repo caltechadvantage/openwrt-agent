@@ -131,6 +131,82 @@ ensure_ngrok_token() {
     print_success "Saved ngrok authtoken to $env_file"
 }
 
+# Resolve the ThingsBoard provisioning key/secret and persist them to
+# ~/.openwrt/local_settings.py so the agent can onboard on first run.
+#
+# Mirrors ensure_ngrok_token, with ONE deliberate difference: there is
+# no committed fallback. The ngrok token is low-risk and lives in the
+# tracked scripts/bootstrap.env; the provisioning secret mints devices
+# against the tenant, so it must never enter the public repo. It is
+# resolved from uncommitted sources only:
+#   1. Already present in a local_settings.py (repo root or ~/.openwrt)
+#   2. TB_PROVISION_KEY / TB_PROVISION_SECRET env vars (dashboard
+#      installer flow, or operator-exported)
+#   3. A gitignored scripts/bootstrap.local.env (drop it onto your
+#      golden image / build host for zero-touch fleet installs)
+#   4. Interactive prompt
+# then persisted to ~/.openwrt/local_settings.py (loaded by settings.py,
+# kept outside the code dir so update.sh doesn't clobber it).
+ensure_provision_keys() {
+    local ls_file="${HOME:-/root}/.openwrt/local_settings.py"
+    local repo_ls="$SCRIPT_DIR/local_settings.py"
+
+    # 1. Already configured in either local_settings.py location — done.
+    if grep -qs '^[[:space:]]*TB_PROVISION_KEY[[:space:]]*=' "$ls_file" "$repo_ls" 2>/dev/null; then
+        print_info "Provisioning keys already present in local_settings.py"
+        return 0
+    fi
+
+    # 2. Inherited from env (dashboard installer flow, or operator ran:
+    #    TB_PROVISION_KEY=xxx TB_PROVISION_SECRET=yyy ./setup.sh)
+    local key="${TB_PROVISION_KEY:-}"
+    local secret="${TB_PROVISION_SECRET:-}"
+
+    # 3. Gitignored local bootstrap file. Unlike scripts/bootstrap.env
+    #    (committed, shared ngrok token), this one is never committed.
+    if { [ -z "$key" ] || [ -z "$secret" ]; } && [ -f "$SCRIPT_DIR/scripts/bootstrap.local.env" ]; then
+        # shellcheck disable=SC1091
+        . "$SCRIPT_DIR/scripts/bootstrap.local.env"
+        key="${key:-${TB_PROVISION_KEY:-}}"
+        secret="${secret:-${TB_PROVISION_SECRET:-}}"
+    fi
+
+    # 4. Prompt only if interactive and still missing.
+    if { [ -z "$key" ] || [ -z "$secret" ]; } && [ "$NON_INTERACTIVE" != "1" ]; then
+        print_info "ThingsBoard provisioning key/secret not configured."
+        print_info "Find them in ThingsBoard: Device profiles > <profile> > Device provisioning."
+        [ -z "$key" ]    && { printf "Paste TB_PROVISION_KEY (or Enter to skip): ";    read key; }
+        [ -z "$secret" ] && { printf "Paste TB_PROVISION_SECRET (or Enter to skip): "; read secret; }
+    fi
+
+    # 5. Still nothing — warn and let provision.py emit its error on the
+    #    first run. Don't fail setup: an already-provisioned unit (one
+    #    with a tb_token in config.json) runs fine without these.
+    if [ -z "$key" ] || [ -z "$secret" ]; then
+        print_warning "Provisioning keys not set — a fresh device will NOT onboard."
+        print_warning "Add TB_PROVISION_KEY / TB_PROVISION_SECRET to $ls_file, then restart the service."
+        return 0
+    fi
+
+    # Persist. Preserve any other overrides already in the file; replace
+    # the two provision lines if present, append otherwise.
+    mkdir -p "$(dirname "$ls_file")"
+    (
+        umask 077
+        if [ -f "$ls_file" ]; then
+            grep -v '^[[:space:]]*TB_PROVISION_KEY[[:space:]]*=' "$ls_file" 2>/dev/null \
+                | grep -v '^[[:space:]]*TB_PROVISION_SECRET[[:space:]]*=' > "${ls_file}.tmp" || true
+        else
+            : > "${ls_file}.tmp"
+        fi
+        echo "TB_PROVISION_KEY = \"$key\"" >> "${ls_file}.tmp"
+        echo "TB_PROVISION_SECRET = \"$secret\"" >> "${ls_file}.tmp"
+        mv "${ls_file}.tmp" "$ls_file"
+        chmod 600 "$ls_file"
+    )
+    print_success "Saved provisioning keys to $ls_file"
+}
+
 # Step 1: Run ngrok setup
 setup_ngrok() {
     print_step "Step 1: Setting Up ngrok"
@@ -240,7 +316,11 @@ print(f"[INFO] Saved site_name='{cfg['site_name']}' to {cfg_path}")
 PYEOF
     fi
     export DTS_SITE_NAME
-    
+
+    # Resolve + persist the TB provisioning key/secret BEFORE the code
+    # service starts, so the agent's first-run provision.py finds them.
+    ensure_provision_keys
+
     # Execute all steps
     setup_ngrok || { print_error "ngrok setup failed"; exit 1; }
     setup_code || { print_error "Code service setup failed"; exit 1; }
