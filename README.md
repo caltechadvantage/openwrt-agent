@@ -20,19 +20,21 @@ Monitoring for OpenWrt routers. Collects system metrics and forwards them to Thi
 ## Installation Guide
 
 > **Production routers are not installed from this repo.** The DTS-MobileQ
-> dashboard generates a one-line installer (Register Device → copy the
-> install command) that clones the **compiled** distribution repo
+> dashboard generates a one-line installer (Register Device, copy the
+> install command) that downloads the **compiled** distribution repo
 > `caltechadvantage/openwrt-agent` (Python bytecode only, `.pyc` per
-> interpreter version, no source) and runs `setup.sh` non-interactively
-> with the ngrok token pre-seeded. That is the supported onboarding path,
-> and the one the "Check for update" button pulls from. `openwrt-agent` is
-> produced automatically from this source repo by
-> `.github/workflows/publish-dist.yml` on every push to `main`
-> (see [RELEASING.md](RELEASING.md)).
+> interpreter version, no source) as a tarball and runs `setup.sh`
+> non-interactively with the ngrok token pre-seeded. The download uses
+> `uclient-fetch` + `tar`, both in the OpenWrt base system, so a stock
+> BusyBox router needs no `git`. That is the supported onboarding path,
+> and the one the "Check for update" button pulls from (also over a
+> tarball, via `update.sh`). `openwrt-agent` is produced automatically
+> from this source repo by `.github/workflows/publish-dist.yml` on every
+> push to `main` (see [RELEASING.md](RELEASING.md)).
 >
 > The manual clone below is for **development against the source** and for
-> reference. Use it when hacking on the agent, not for provisioning field
-> units.
+> reference (a dev box has `git`). Field units are onboarded from the
+> compiled `openwrt-agent` tarball via the dashboard installer instead.
 
 ### Quick Setup (development / source install)
 
