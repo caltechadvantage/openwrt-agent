@@ -1,13 +1,13 @@
 # OpenWrt Monitoring Service
 
-A comprehensive monitoring solution for OpenWrt routers that collects system metrics and forwards them to ThingsBoard. This project includes ngrok setup for remote access to the router's LuCI interface.
+Monitoring for OpenWrt routers. Collects system metrics and forwards them to ThingsBoard, and sets up ngrok for remote access to the router's LuCI interface.
 
 ## Features
 
-- **System Metrics Collection**: Automatically collects router metrics (CPU, memory, network, etc.)
+- **System Metrics Collection**: Collects router metrics (CPU, memory, network, etc.)
 - **ThingsBoard Integration**: Sends metrics to ThingsBoard for visualization and monitoring
-- **ngrok Tunneling**: Creates secure tunnels to access LuCI interface and ttyd web terminal remotely
-- **Auto-restart Service**: Automatically restarts the monitoring service if it crashes
+- **ngrok Tunneling**: Secure tunnels to reach the LuCI interface and ttyd web terminal remotely
+- **Auto-restart Service**: Restarts the monitoring service if it crashes
 - **Service Management**: Standard OpenWrt service management with procd
 
 ## Requirements
@@ -19,12 +19,30 @@ A comprehensive monitoring solution for OpenWrt routers that collects system met
 
 ## Installation Guide
 
-### Quick Setup
+> **Production routers are not installed from this repo.** The DTS-MobileQ
+> dashboard generates a one-line installer (Register Device → copy the
+> install command) that clones the **compiled** distribution repo
+> `caltechadvantage/openwrt-agent` (Python bytecode only, `.pyc` per
+> interpreter version, no source) and runs `setup.sh` non-interactively
+> with the ngrok token pre-seeded. That is the supported onboarding path,
+> and the one the "Check for update" button pulls from. `openwrt-agent` is
+> produced automatically from this source repo by
+> `.github/workflows/publish-dist.yml` on every push to `main`
+> (see [RELEASING.md](RELEASING.md)).
+>
+> The manual clone below is for **development against the source** and for
+> reference. Use it when hacking on the agent, not for provisioning field
+> units.
+
+### Quick Setup (development / source install)
 
 1. **Clone the project into router:**
    ```bash
    opkg update
    opkg install git-http
+   # Source repo (this repo): for development only.
+   # Field units are onboarded from the compiled openwrt-agent dist
+   # via the dashboard installer instead (see the note above).
    git clone https://github.com/caltechadvantage/openwrt.git
    ```
 

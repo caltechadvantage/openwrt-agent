@@ -1,9 +1,13 @@
 #!/bin/sh
 
 # Update Script for OpenWrt Monitoring Service
-# Usage: ./update.sh          - pull latest from current branch
-#        ./update.sh main     - checkout and pull specific branch
-#        ./update.sh abc123   - checkout specific commit/tag
+# Usage: ./update.sh          - update to latest main
+#        ./update.sh v2.16.0  - update to a specific tag/branch/commit
+#
+# The agent is fetched as a tarball, not `git clone`/`git fetch`: a stock
+# BusyBox image has no git, and installing git-http drags in a libcurl
+# chain that fails on constrained devices. uclient-fetch + BusyBox tar/gzip
+# are base-system, so update needs zero extra packages.
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -12,22 +16,24 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 OPENWRT_DIR="/root/openwrt"
+REPO="caltechadvantage/openwrt-agent"
 
 cd "$OPENWRT_DIR" || { echo -e "${RED}ERROR: $OPENWRT_DIR not found${NC}"; exit 1; }
 
 # ---- Dashboard status reporter ----------------------------------------------
 # Publish an update-progress telemetry frame straight to ThingsBoard's HTTP
 # telemetry endpoint. We don't go through the python agent for this because
-# the agent is about to be killed. Uses the same tb_token the agent uses.
+# the agent is about to be killed. uclient-fetch is the stock OpenWrt HTTPS
+# client — curl is NOT installed on a base image, which is why the old
+# curl-based reporter here silently never delivered.
 TB_URL="$(python3 -c 'import sys; sys.path.insert(0,"/root/openwrt"); from settings import TB_SERVER_URL; print(TB_SERVER_URL)' 2>/dev/null)"
 TB_TOKEN="$(python3 -c 'import json; print(json.load(open("/root/.openwrt/config.json")).get("tb_token",""))' 2>/dev/null)"
 
 publish_status() {
     [ -z "$TB_URL" ] && return 0
     [ -z "$TB_TOKEN" ] && return 0
-    curl -sS -m 5 -X POST \
-        -H 'Content-Type: application/json' \
-        --data "$1" \
+    uclient-fetch -q -T 5 -O /dev/null \
+        --post-data="$1" \
         "$TB_URL/api/v1/$TB_TOKEN/telemetry" >/dev/null 2>&1
 }
 
@@ -37,36 +43,34 @@ die() {
     exit 1
 }
 
-# Show current state
-current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-current_commit=$(git rev-parse --short HEAD 2>/dev/null)
-echo -e "${CYAN}Current:${NC} branch=${current_branch} commit=${current_commit}"
+# Current version comes from the CI-stamped VERSION file (a dev checkout
+# may lack it — fall back to "unknown").
+current_version="$( [ -f "$OPENWRT_DIR/VERSION" ] && cat "$OPENWRT_DIR/VERSION" || echo unknown )"
+echo -e "${CYAN}Current:${NC} ${current_version}"
 
-# Step 1: Fetch and hard-align to remote.
+# Step 1: Download the target tarball and swap files in place.
 #
-# We used to `git checkout -- . && git pull`. That breaks on git 2.27+
-# whenever origin/main is force-pushed (branch tags rewritten during a
-# release) — pull sees divergent history and refuses without an explicit
-# reconcile policy. On a router the working tree is disposable; origin is
-# the source of truth. So fetch, then reset --hard to the target ref.
-echo -e "${GREEN}[1/4]${NC} Updating code..."
+# codeload accepts a branch, tag, or commit as the ref and unpacks to a
+# single top-level <repo>-<ref> directory, which we copy over the existing
+# install. No .git, so nothing to diverge or force-reset.
+echo -e "${GREEN}[1/4]${NC} Downloading code..."
 publish_status '{"update_status":"pulling"}'
-git fetch origin --prune --tags || die "git_fetch_failed"
-
 target="${1:-main}"
+url="https://codeload.github.com/$REPO/tar.gz/$target"
 
-if git show-ref --verify --quiet "refs/remotes/origin/$target"; then
-    echo -e "${CYAN}       Aligning to origin/${target}${NC}"
-    git checkout -B "$target" "origin/$target" 2>/dev/null || die "git_checkout_failed"
-    git reset --hard "origin/$target" || die "git_reset_failed"
-else
-    # Not a branch — treat as tag or commit, detach so we don't clobber a branch ref.
-    echo -e "${CYAN}       Checking out ref: $target${NC}"
-    git checkout --force --detach "$target" || die "git_checkout_ref_failed"
-fi
+tmp_tgz="/tmp/openwrt-agent-update.tar.gz"
+tmp_dir="/tmp/openwrt-agent-update"
+rm -rf "$tmp_tgz" "$tmp_dir"
+mkdir -p "$tmp_dir"
+uclient-fetch -q -T 60 -O "$tmp_tgz" "$url" || die "download_failed"
+tar xzf "$tmp_tgz" -C "$tmp_dir" || die "extract_failed"
+src="$(echo "$tmp_dir"/*/)"
+[ -d "$src" ] || die "extract_empty"
+cp -r "$src". "$OPENWRT_DIR/" || die "copy_failed"
+rm -rf "$tmp_tgz" "$tmp_dir"
 
-new_commit=$(git rev-parse --short HEAD 2>/dev/null)
-echo -e "${CYAN}       Updated to: ${new_commit}${NC}"
+new_version="$( [ -f "$OPENWRT_DIR/VERSION" ] && cat "$OPENWRT_DIR/VERSION" || echo unknown )"
+echo -e "${CYAN}       Updated to: ${new_version}${NC}"
 
 # Step 2: Stop service and kill stale processes
 echo -e "${GREEN}[2/4]${NC} Stopping service..."
@@ -91,13 +95,7 @@ sleep 3
 # Step 4: Verify
 echo -e "${GREEN}[4/4]${NC} Verifying..."
 if ps | grep "main.py" | grep -qv grep; then
-    # Prefer the CI-stamped VERSION file (compiled dist). Fall back to
-    # grepping the source file — dev-checkout routers only.
-    if [ -f "$OPENWRT_DIR/VERSION" ]; then
-        version=$(cat "$OPENWRT_DIR/VERSION")
-    else
-        version=$(grep 'PROJECT_VERSION' "$OPENWRT_DIR/utils/thingsboard.py" 2>/dev/null | head -1 | cut -d'"' -f2)
-    fi
+    version="$new_version"
     [ -z "$version" ] && version="unknown"
     echo -e "${GREEN}OK${NC} - Service running (${version})"
     echo -e "${CYAN}Logs:${NC} tail -f /var/log/openwrt.log"
