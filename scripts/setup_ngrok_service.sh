@@ -293,10 +293,12 @@ EOF
         return 1
     fi
     
-    # Display configuration
+    # Display configuration, with the authtoken masked. Callers redirect this
+    # output into a log file, so printing it in clear would leave the fleet
+    # token sitting in plaintext on every device.
     print_info "Configuration file contents:"
     echo ""
-    cat "$NGROK_CONFIG"
+    sed 's/^\([[:space:]]*authtoken:\).*/\1 ****redacted****/' "$NGROK_CONFIG"
     echo ""
     
     return 0
