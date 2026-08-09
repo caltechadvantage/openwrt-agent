@@ -1,0 +1,21 @@
+version: "3"
+agent:
+    # Replace with your ngrok account auth token. setup_ngrok.sh
+    # rewrites this file per-device using NGROK_AUTHTOKEN from the env
+    # or /etc/openwrt-agent.env, so you usually don't edit this by
+    # hand — this committed copy is just a template.
+    authtoken: REPLACE_WITH_NGROK_AUTHTOKEN
+
+endpoints:
+  - name: https-ui
+    # Per-device hostname pattern: <site-name>.<your-ngrok-domain>
+    # setup_ngrok.sh substitutes the site name on the box from the
+    # router's hostname.
+    url: https://REPLACE_WITH_SITE_NAME.ngrok.example.com
+    upstream:
+      url: http://127.0.0.1:80
+
+  - name: ttyd
+    url: https://REPLACE_WITH_SITE_NAME-shell.ngrok.example.com
+    upstream:
+      url: http://172.16.16.1:7681

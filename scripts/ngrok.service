@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/ngrok
+# Starts ngrok automatically after reboot
+
+START=99
+STOP=10
+
+CONFIG="/root/.config/ngrok/ngrok.yml"
+LOG="/var/log/ngrok.log"
+
+start() {
+    echo "[ngrok] Starting ngrok tunnels..." > $LOG
+
+    # Wait for WAN
+    while ! ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; do
+        echo "[ngrok] Waiting for network..." >> $LOG
+        sleep 5
+    done
+
+    echo "[ngrok] Network up. Launching ngrok..." >> $LOG
+    # Start ngrok with explicit config
+    /usr/bin/ngrok start --all --config $CONFIG >> $LOG 2>&1 &
+}
+
+stop() {
+    echo "[ngrok] Stopping ngrok..." >> $LOG
+    killall -9 ngrok
+}
