@@ -78,6 +78,12 @@ MQTT_BROKER_USERNAME = os.environ.get("MQTT_BROKER_USERNAME") or None
 MQTT_BROKER_PASSWORD = os.environ.get("MQTT_BROKER_PASSWORD") or None
 DTS_HTTP_URL = os.environ.get("DTS_HTTP_URL") or None  # e.g. http://157.173.106.229:5173
 
+# The DTS dashboard, used only to ask for a new access token when this
+# router's ThingsBoard device has been deleted and its own token stopped
+# working. Separate from DTS_HTTP_URL above, which is the optional mirror
+# of the telemetry path. See utils/recovery.py.
+DTS_DASHBOARD_URL = os.environ.get("DTS_DASHBOARD_URL", "https://dashboard.mobilelinq.com")
+
 # Turn screen off time(minutes)
 SCREEN_SAVER_TIME = 1
 
