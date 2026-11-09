@@ -12,7 +12,8 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Default values
-LOCAL_PORT="${LOCAL_PORT:-80}"
+# LuCI is nginx on 443. Override with LOCAL_PORT if a box still uses another port.
+LOCAL_PORT="${LOCAL_PORT:-443}"
 REMOTE_HOST="${REMOTE_HOST:-}"
 REMOTE_PORT="${REMOTE_PORT:-}"
 KEY_NAME="${KEY_NAME:-openwrt_ed25519}"
@@ -49,83 +50,12 @@ check_root() {
     fi
 }
 
-# Step 1: Configure LuCI visibility
+# LuCI visibility is nginx on 443. Do not bind uhttpd to 0.0.0.0:80.
 configure_luci() {
-    print_step "Step 1: Configuring LuCI Visibility"
-    
-    print_info "Checking uhttpd status..."
-    if /etc/init.d/uhttpd status > /dev/null 2>&1; then
-        print_success "uhttpd is running"
-    else
-        print_info "Starting uhttpd..."
-        /etc/init.d/uhttpd start
-        if [ $? -eq 0 ]; then
-            print_success "uhttpd started successfully"
-        else
-            print_error "Failed to start uhttpd"
-            return 1
-        fi
-    fi
-    
-    print_info "Enabling uhttpd to start at boot..."
-    /etc/init.d/uhttpd enable
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd enabled for boot"
-    else
-        print_warning "Failed to enable uhttpd (may already be enabled)"
-    fi
-    
-    print_info "Configuring uhttpd to listen on port ${LOCAL_PORT}..."
-    uci set uhttpd.main.listen_http="0.0.0.0:${LOCAL_PORT}"
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd configured to listen on 0.0.0.0:${LOCAL_PORT}"
-    else
-        print_error "Failed to configure uhttpd listen port"
-        return 1
-    fi
-    
-    print_info "Disabling HTTPS redirect to allow HTTP access on port ${LOCAL_PORT}..."
-    uci set uhttpd.main.redirect_https='0'
-    if [ $? -eq 0 ]; then
-        print_success "HTTPS redirect disabled"
-    else
-        print_warning "Failed to disable HTTPS redirect (may already be disabled)"
-    fi
-    
-    print_info "Disabling RFC1918 filtering to allow all connections..."
-    uci set uhttpd.main.rfc1918_filter='0'
-    if [ $? -eq 0 ]; then
-        print_success "RFC1918 filtering disabled"
-    else
-        print_warning "Failed to disable RFC1918 filtering (may already be disabled)"
-    fi
-    
-    print_info "Committing uhttpd configuration changes..."
-    uci commit uhttpd
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd configuration committed"
-    else
-        print_error "Failed to commit uhttpd configuration"
-        return 1
-    fi
-    
-    print_info "Restarting uhttpd..."
-    /etc/init.d/uhttpd restart
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd restarted successfully"
-    else
-        print_error "Failed to restart uhttpd"
-        return 1
-    fi
-    
-    print_info "Starting dropbear SSH service..."
-    /etc/init.d/dropbear start
-    if [ $? -eq 0 ]; then
-        print_success "dropbear started successfully"
-    else
-        print_warning "dropbear may already be running"
-    fi
-    
+    print_step "Step 1: LuCI on nginx"
+    web_setup="$(CDPATH= cd "$(dirname "$0")" && pwd)/setup_nginx_luci.sh"
+    sh "$web_setup" || return 1
+    /etc/init.d/dropbear start 2>/dev/null || true
     return 0
 }
 

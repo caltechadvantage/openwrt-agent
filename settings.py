@@ -6,6 +6,38 @@ os.makedirs(ROOT_DIR, exist_ok=True)
 
 INTERVAL = 30
 
+# WAN alarm observations. Link up/down is read from local netifd, hotplug,
+# and carrier state, which sends no traffic on the WAN. A single small
+# ICMP is used only to catch "link is up but nothing passes", and only
+# when Bondix is not already reporting that channel healthy.
+#
+# Probe interval is per WAN and is clamped to at least 180s so a bad
+# shared attribute cannot ping a cellular modem every few seconds.
+# Heartbeat is a small alarm document, separate from INTERVAL above.
+# Shared attributes wan_probe_interval_sec, wan_alarm_heartbeat_sec,
+# wan_probe_confirm_count, and wan_probe_targets override these at runtime.
+# Every configured WAN is probed, including Bondix backup/standby channels.
+# Bondix being up does not skip the probe. Targets are public Internet
+# addresses; the WAN is unreachable only when every target fails confirm.
+WAN_PROBE_INTERVAL_SEC = 300
+WAN_PROBE_CONFIRM_COUNT = 3
+WAN_ALARM_HEARTBEAT_SEC = 180
+WAN_PROBE_TARGETS = ("1.1.1.1", "8.8.8.8")
+# Optional extra host (for example a DTS-owned address). Appended to the
+# list above. A single value is not enough: the list is kept at two or more.
+WAN_PROBE_TARGET = None
+
+# LuCI web UI. setup and update run scripts/setup_nginx_luci.sh, which
+# moves LuCI from uhttpd onto nginx (OpenWrt 24.10) and then leaves a
+# working nginx install alone. Set this false to skip that step. The
+# script never rewrites uhttpd onto 0.0.0.0:80, and it does not touch
+# firewall zones or Bondix configuration.
+LUCI_USE_NGINX = True
+
+# When true, delete nginx._lan.restrict_locally so a LAN that uses
+# public addresses can open LuCI. Default false: leave the package default.
+LUCI_NGINX_RELAX_RESTRICT_LOCALLY = False
+
 
 DEFAULT_CONFIG = {
     "interval": 30,

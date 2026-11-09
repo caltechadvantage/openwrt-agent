@@ -48,6 +48,22 @@ TB_PROVISION_SECRET = "REPLACE_WITH_TENANT_SECRET"
 # more cellular traffic if the WAN uplink is metered.
 # INTERVAL = 30
 
+# WAN alarm probe and heartbeat. Link state itself does not probe.
+# Every configured WAN, including a Bondix backup, gets one small ICMP
+# per interval. The agent refuses to go below 180 seconds.
+# WAN_PROBE_INTERVAL_SEC = 300
+# WAN_PROBE_CONFIRM_COUNT = 3
+# WAN_ALARM_HEARTBEAT_SEC = 180
+# At least two public targets. The probe is bound to each WAN interface.
+# WAN_PROBE_TARGETS = ("1.1.1.1", "8.8.8.8")
+# Optional DTS-owned host, added beside the list above.
+# WAN_PROBE_TARGET = "probe.example.com"
+
+# LuCI. False skips the uhttpd-to-nginx step. The second flag, when
+# true, removes nginx._lan.restrict_locally for LANs that use public IPs.
+# LUCI_USE_NGINX = True
+# LUCI_NGINX_RELAX_RESTRICT_LOCALLY = False
+
 # Ngrok auto-stop seconds. The dashboard's Start ngrok button always
 # arms an auto-shutdown so a tunnel left open after a debugging
 # session doesn't run forever.

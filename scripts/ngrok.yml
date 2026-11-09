@@ -13,7 +13,17 @@ endpoints:
     # router's hostname.
     url: https://REPLACE_WITH_SITE_NAME.ngrok.example.com
     upstream:
-      url: http://127.0.0.1:80
+      # Loopback nginx. Host _lan selects that server. Upstream TLS
+      # verification stays off: ngrok 3.33 endpoints have no field for it,
+      # and these scripts never pass --upstream-tls-verify.
+      url: https://localhost:443
+    traffic_policy:
+      on_http_request:
+        - actions:
+            - type: add-headers
+              config:
+                headers:
+                  host: _lan
 
   - name: ttyd
     url: https://REPLACE_WITH_SITE_NAME-shell.ngrok.example.com

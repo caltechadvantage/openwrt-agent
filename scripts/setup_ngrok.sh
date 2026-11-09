@@ -18,7 +18,6 @@ NGROK_CONFIG="/root/.config/ngrok/ngrok.yml"
 # OR /etc/openwrt-agent.env (sourced below if present). Never tracked
 # in source.
 NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"
-LOCAL_PORT="80"
 [ -f /etc/openwrt-agent.env ] && . /etc/openwrt-agent.env
 if [ -z "$NGROK_AUTHTOKEN" ]; then
     echo "[ERROR] NGROK_AUTHTOKEN not set." >&2
@@ -59,76 +58,22 @@ check_root() {
     fi
 }
 
-# Step 1: Configure uhttpd on port 80
-configure_uhttpd() {
-    print_step "Step 1: Configuring uhttpd on Port 80"
-    
-    print_info "Checking uhttpd status..."
-    if /etc/init.d/uhttpd status > /dev/null 2>&1; then
-        print_success "uhttpd is running"
-    else
-        print_info "Starting uhttpd..."
-        /etc/init.d/uhttpd start
-        if [ $? -eq 0 ]; then
-            print_success "uhttpd started successfully"
-        else
-            print_error "Failed to start uhttpd"
-            return 1
-        fi
-    fi
-    
-    print_info "Enabling uhttpd to start at boot..."
-    /etc/init.d/uhttpd enable
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd enabled for boot"
-    else
-        print_warning "Failed to enable uhttpd (may already be enabled)"
-    fi
-    
-    print_info "Configuring uhttpd to listen on port ${LOCAL_PORT}..."
-    uci set uhttpd.main.listen_http="0.0.0.0:${LOCAL_PORT}"
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd configured to listen on 0.0.0.0:${LOCAL_PORT}"
-    else
-        print_error "Failed to configure uhttpd listen port"
+# LuCI is nginx on 443. This does not start uhttpd or bind it to 0.0.0.0:80.
+configure_web_ui() {
+    print_step "Step 1: LuCI on nginx"
+    web_setup="$(CDPATH= cd "$(dirname "$0")" && pwd)/setup_nginx_luci.sh"
+    if [ ! -f "$web_setup" ]; then
+        print_error "Missing $web_setup"
         return 1
     fi
-    
-    print_info "Committing uhttpd configuration changes..."
-    uci commit uhttpd
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd configuration committed"
-    else
-        print_error "Failed to commit uhttpd configuration"
+    sh "$web_setup"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        print_error "LuCI nginx step failed"
         return 1
     fi
-    
-    print_info "Restarting uhttpd..."
-    /etc/init.d/uhttpd restart
-    if [ $? -eq 0 ]; then
-        print_success "uhttpd restarted successfully"
-    else
-        print_error "Failed to restart uhttpd"
-        return 1
-    fi
-    
     print_info "Starting dropbear SSH service..."
-    /etc/init.d/dropbear start
-    if [ $? -eq 0 ]; then
-        print_success "dropbear started successfully"
-    else
-        print_warning "dropbear may already be running"
-    fi
-    
-    # Verify uhttpd is running
-    print_info "Verifying uhttpd is accessible on port ${LOCAL_PORT}..."
-    sleep 2
-    if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${LOCAL_PORT} | grep -q "200\|301\|302\|401\|403"; then
-        print_success "uhttpd is running and accessible on port ${LOCAL_PORT}"
-    else
-        print_warning "uhttpd may not be fully ready yet. Please verify manually with: curl http://127.0.0.1:${LOCAL_PORT}"
-    fi
-    
+    /etc/init.d/dropbear start 2>/dev/null || print_warning "dropbear may already be running"
     return 0
 }
 
@@ -228,7 +173,7 @@ get_ngrok_config() {
     echo -e "  ${CYAN}HTTPS URL:${NC} https://${NGROK_URL_PREFIX}.ngrok.gigabonding.com"
     echo -e "  ${CYAN}ttyd URL:${NC} https://${NGROK_URL_PREFIX}${TTYD_URL_SUFFIX}.ngrok.gigabonding.com"
     echo -e "  ${CYAN}ttyd Upstream:${NC} http://${TTYD_UPSTREAM_IP}:${TTYD_UPSTREAM_PORT}"
-    echo -e "  ${CYAN}Local Port:${NC} ${LOCAL_PORT}"
+    echo -e "  ${CYAN}LuCI upstream:${NC} https://localhost:443"
     
     if [ "${DTS_NON_INTERACTIVE:-0}" = "1" ]; then
         return 0
@@ -304,31 +249,10 @@ create_ngrok_config() {
         fi
     fi
     
-    print_info "Creating ngrok configuration file at $NGROK_CONFIG..."
-    
-    cat > "$NGROK_CONFIG" << EOF
-version: "3"
-agent:
-    authtoken: ${NGROK_AUTHTOKEN}
-
-endpoints:
-  - name: https-ui
-    url: https://${NGROK_URL_PREFIX}.ngrok.gigabonding.com
-    upstream:
-      url: http://127.0.0.1:${LOCAL_PORT}
-
-  - name: ttyd
-    url: https://${NGROK_URL_PREFIX}${TTYD_URL_SUFFIX}.ngrok.gigabonding.com
-    upstream:
-      url: http://${TTYD_UPSTREAM_IP}:${TTYD_UPSTREAM_PORT}
-
-  # SSH endpoint (commented out - kept for reference)
-  # - name: ssh
-  #   url: tcp://${SSH_TUNNEL_PREFIX}.tcp.ngrok.io:${SSH_TUNNEL_PORT}
-  #   upstream:
-  #     url: 22
-EOF
-    
+    print_info "Writing ngrok configuration file at $NGROK_CONFIG (existing file is backed up first)..."
+    # shellcheck disable=SC1091
+    . "$(CDPATH= cd "$(dirname "$0")" && pwd)/lib_ngrok_config.sh"
+    write_ngrok_config
     if [ $? -eq 0 ]; then
         print_success "ngrok configuration file created successfully"
     else
@@ -358,7 +282,7 @@ main() {
     check_root
     
     # Execute all steps
-    configure_uhttpd || { print_error "Failed to configure uhttpd"; exit 1; }
+    configure_web_ui || { print_error "Failed to configure LuCI"; exit 1; }
     get_ngrok_config || { print_error "Failed to get ngrok configuration"; exit 1; }
     install_ngrok_binary || { print_error "Failed to install ngrok binary"; exit 1; }
     create_ngrok_config || { print_error "Failed to create ngrok configuration"; exit 1; }

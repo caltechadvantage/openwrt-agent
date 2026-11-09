@@ -324,6 +324,11 @@ PYEOF
     # Execute all steps
     setup_ngrok || { print_error "ngrok setup failed"; exit 1; }
     setup_code || { print_error "Code service setup failed"; exit 1; }
+    if [ -f "$SCRIPT_DIR/scripts/setup_bondix_watchdog.sh" ]; then
+        print_info "Installing Bondix watchdog (management routes and last-resort)"
+        sh "$SCRIPT_DIR/scripts/setup_bondix_watchdog.sh" || \
+            print_warning "Bondix watchdog install failed. Last-resort is not active."
+    fi
     
     # Final summary
     echo ""
@@ -333,6 +338,7 @@ PYEOF
     echo ""
     print_info "Service Management:"
     echo -e "  ${CYAN}Code Service:${NC} /etc/init.d/openwrt-main {start|stop|status}"
+    echo -e "  ${CYAN}Bondix watchdog:${NC} /etc/init.d/bondix-watchdog {start|stop|status}"
     echo ""
     print_info "ngrok Configuration:"
     echo -e "  ${CYAN}Config File:${NC} /root/.config/ngrok/ngrok.yml"

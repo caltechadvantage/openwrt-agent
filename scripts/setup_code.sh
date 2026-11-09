@@ -443,6 +443,33 @@ enable_service() {
     return 0
 }
 
+# Copy the iface hotplug hook into place. The agent also installs this
+# on startup when it can, so an update.sh that does not re-run setup
+# still gets the hook. Failure here is not fatal: ubus and netlink
+# watchers cover the same events.
+install_wan_hotplug() {
+    local here src dest_dir dest
+    here="$(cd "$(dirname "$0")" && pwd)"
+    src="$here/99-gigabonding-wan"
+    dest_dir="/etc/hotplug.d/iface"
+    dest="$dest_dir/99-gigabonding-wan"
+    if [ ! -f "$src" ]; then
+        src="$OPENWRT_DIR/scripts/99-gigabonding-wan"
+    fi
+    if [ ! -f "$src" ]; then
+        print_warning "WAN hotplug script not found"
+        return 1
+    fi
+    if [ ! -d "$dest_dir" ]; then
+        print_warning "$dest_dir does not exist; skipping WAN hotplug hook"
+        return 1
+    fi
+    cp "$src" "$dest"
+    chmod 755 "$dest"
+    print_success "Installed WAN hotplug hook at $dest"
+    return 0
+}
+
 # Main execution
 main() {
     echo ""
@@ -461,6 +488,7 @@ main() {
     create_run_main_script || { print_error "Failed to create run_main.sh"; exit 1; }
     create_init_script || { print_error "Failed to create init script"; exit 1; }
     enable_service || { print_error "Failed to enable service"; exit 1; }
+    install_wan_hotplug || print_warning "WAN hotplug hook was not installed"
     
     # Final summary
     echo ""

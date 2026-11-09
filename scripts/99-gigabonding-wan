@@ -1,0 +1,38 @@
+#!/bin/sh
+# OpenWrt hotplug hook for WAN link events.
+#
+# Installed at /etc/hotplug.d/iface/99-gigabonding-wan. The agent reads
+# the lines it appends. This script does not configure interfaces, firewall
+# zones, or Bondix. eth0 is recorded if hotplug mentions it; the agent
+# ignores it because eth0 is the LAN port.
+#
+# OpenWrt sets ACTION (ifup/ifdown/ifupdate), INTERFACE, and DEVICE.
+
+case "${ACTION:-}" in
+    ifup|ifdown|ifupdate) ;;
+    *) exit 0 ;;
+esac
+
+DIR=/tmp/openwrt-agent
+mkdir -p "$DIR" 2>/dev/null || exit 0
+OUT="$DIR/wan-hotplug.jsonl"
+
+# DEVICE and INTERFACE are set by procd. Keep them out of a shell-expanded
+# JSON string by using a here-doc with quoted values only after a trivial
+# character filter (hotplug names are iface identifiers).
+safe() {
+    printf '%s' "$1" | tr -cd 'A-Za-z0-9._-'
+}
+action=$(safe "$ACTION")
+interface=$(safe "${INTERFACE:-}")
+device=$(safe "${DEVICE:-}")
+ts=$(date +%s 2>/dev/null || echo 0)
+printf '{"action":"%s","interface":"%s","device":"%s","ts":%s}\n' \
+    "$action" "$interface" "$device" "$ts" >> "$OUT" 2>/dev/null || exit 0
+
+# Bound the file. A flap storm should not fill /tmp.
+line_count=$(wc -l < "$OUT" 2>/dev/null || echo 0)
+if [ "$line_count" -gt 80 ]; then
+    tail -n 40 "$OUT" > "$OUT.tmp" 2>/dev/null && mv "$OUT.tmp" "$OUT"
+fi
+exit 0

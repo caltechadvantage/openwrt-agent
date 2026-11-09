@@ -93,41 +93,10 @@ disable_service() {
     return 0
 }
 
-# Step 3: Kill any remaining ngrok processes
+# ngrok is started by hand. Removing the service does not kill it.
 kill_ngrok() {
-    print_step "Step 3: Cleaning Up ngrok Processes"
-    
-    print_info "Checking for running ngrok processes..."
-    ngrok_count=$(ps | grep -c "[n]grok" || echo "0")
-    
-    if [ "$ngrok_count" -gt "0" ]; then
-        print_warning "Found $ngrok_count ngrok process(es)"
-        print_info "Killing all ngrok processes..."
-        
-        # Kill by process name
-        killall ngrok 2>/dev/null
-        sleep 1
-        
-        # Double check and force kill if needed
-        remaining=$(ps | grep -c "[n]grok" || echo "0")
-        if [ "$remaining" -gt "0" ]; then
-            print_warning "Some processes still running, force killing..."
-            killall -9 ngrok 2>/dev/null
-            sleep 1
-        fi
-        
-        # Verify cleanup
-        final_count=$(ps | grep -c "[n]grok" || echo "0")
-        if [ "$final_count" -eq "0" ]; then
-            print_success "All ngrok processes terminated"
-        else
-            print_warning "Some ngrok processes may still be running"
-        fi
-    else
-        print_info "No ngrok processes found"
-        print_success "No cleanup needed"
-    fi
-    
+    print_step "Step 3: Leaving ngrok running"
+    print_info "ngrok is not killed. Stop it yourself if you still want the tunnel down."
     return 0
 }
 

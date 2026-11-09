@@ -100,6 +100,23 @@ if ps | grep "main.py" | grep -qv grep; then
     echo -e "${GREEN}OK${NC} - Service running (${version})"
     echo -e "${CYAN}Logs:${NC} tail -f /var/log/openwrt.log"
     publish_status "{\"update_status\":\"completed\",\"update_new_version\":\"${version}\"}"
+    if [ -f "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" ]; then
+        echo -e "${CYAN}LuCI:${NC} nginx check (uhttpd is not restarted when nginx is installed)"
+        sh "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" || \
+            echo -e "${YELLOW}WARNING: LuCI nginx step failed. Backup is under /root/backup-nginx${NC}"
+    fi
+    if [ -f "$OPENWRT_DIR/scripts/lib_ngrok_config.sh" ]; then
+        echo -e "${CYAN}ngrok:${NC} https-ui upstream https://localhost:443 (ngrok is not restarted)"
+        # shellcheck disable=SC1091
+        . "$OPENWRT_DIR/scripts/lib_ngrok_config.sh"
+        NGROK_CONFIG="/root/.config/ngrok/ngrok.yml" migrate_ngrok_luci_upstream || \
+            echo -e "${YELLOW}WARNING: ngrok LuCI upstream was not updated${NC}"
+    fi
+    if [ -f "$OPENWRT_DIR/scripts/setup_bondix_watchdog.sh" ]; then
+        echo -e "${CYAN}Watchdog:${NC} bondix-watchdog (keeps an existing UCI file)"
+        sh "$OPENWRT_DIR/scripts/setup_bondix_watchdog.sh" || \
+            echo -e "${YELLOW}WARNING: Bondix watchdog install failed${NC}"
+    fi
 else
     echo -e "${RED}ERROR: Service failed to start${NC}"
     echo -e "${CYAN}Check:${NC} tail -f /var/log/openwrt.log"

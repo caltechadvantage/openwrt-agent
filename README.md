@@ -68,7 +68,7 @@ Monitoring for OpenWrt routers. Collects system metrics and forwards them to Thi
 - Installs ngrok binary and configuration
 - Installs Python dependencies (`requests`, `paho-mqtt`)
 - Creates and starts monitoring service
-- Configures uhttpd for LuCI access
+- Serves LuCI with nginx on 443 only (no port-80 redirect; does not bind uhttpd to 0.0.0.0:80)
 
 **Individual scripts:**
 - `scripts/setup_ngrok.sh` - Installs ngrok binary and creates config file
@@ -143,6 +143,15 @@ ngrok start --all --config /root/.config/ngrok/ngrok.yml &
 tail -f /var/log/openwrt-main.log
 ```
 
+### Bondix watchdog
+
+Keeps ThingsBoard, DNS, NTP, and ngrok off `bondix0`, and can give the LAN a WAN path when the tunnel is down. It does not change the Bondix firewall zone. Config is `/etc/config/bondix-watchdog`. Set `option last_resort '0'` on a site that must stay fail-closed. Details and the Cube-Demo test plan are in `docs/bondix-watchdog.md`.
+
+```bash
+/etc/init.d/bondix-watchdog status
+logread -e bondix-watchdog
+```
+
 ## Uninstallation
 
 To remove all services:
@@ -193,7 +202,7 @@ The ngrok configuration is stored in `/root/.config/ngrok/ngrok.yml`. You can ed
 - Update authtoken
 
 The configuration file includes two endpoints:
-- `https-ui`: For accessing LuCI interface (upstream: `http://127.0.0.1:80`)
+- `https-ui`: For accessing LuCI (upstream: `https://localhost:443`, Host header `_lan`)
 - `ttyd`: For accessing web terminal (upstream: `http://172.16.16.1:7681` or configured IP/port)
 
 After editing, restart ngrok:
@@ -344,6 +353,6 @@ For issues or questions:
 - Services automatically restart if they crash
 - All services use OpenWrt's procd init system
 - ngrok creates two tunnels: one for LuCI interface (https-ui) and one for ttyd web terminal
-- The https-ui endpoint connects to `http://127.0.0.1:80` for LuCI access
+- The https-ui endpoint connects to `https://localhost:443` for LuCI. ngrok 3.33 does not check nginx's self-signed certificate unless `--upstream-tls-verify` is passed, and these scripts do not pass it.
 - The ttyd endpoint connects to the configured IP address (default: `172.16.16.1:7681`) for web terminal access
 
