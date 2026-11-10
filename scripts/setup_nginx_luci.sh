@@ -342,6 +342,85 @@ disable_http_redirect() {
     return 0
 }
 
+_migrate_log() {
+    mkdir -p "$BACKUP_ROOT"
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)" "$*" >> "$BACKUP_ROOT/migrate.log"
+    echo "$*"
+}
+
+_opkg_lists_fresh() {
+    lists="${OPKG_LISTS_DIR:-/var/opkg-lists}"
+    [ -d "$lists" ] || return 1
+    find "$lists" -type f -mtime -1 2>/dev/null | head -n 1 | grep -q .
+}
+
+_ensure_opkg_lists() {
+    if _opkg_lists_fresh; then
+        _migrate_log "opkg lists are fresh"
+        return 0
+    fi
+    _migrate_log "opkg update"
+    if _would "opkg update"; then
+        return 0
+    fi
+    opkg update
+}
+
+_pkg_installed() {
+    opkg list-installed 2>/dev/null | grep -q "^$1 "
+}
+
+_remove_uhttpd_stack() {
+    rc=0
+    for pkg in luci-light luci-ssl luci uhttpd-mod-ubus uhttpd; do
+        if _pkg_installed "$pkg"; then
+            _migrate_log "opkg remove $pkg"
+            opkg remove "$pkg" || rc=1
+        else
+            _migrate_log "skip $pkg, not installed"
+        fi
+    done
+    return "$rc"
+}
+
+_install_nginx_luci() {
+    if opkg info luci-nginx >/dev/null 2>&1; then
+        _migrate_log "opkg install luci-nginx"
+        opkg install luci-nginx
+        return $?
+    fi
+    _migrate_log "opkg install nginx-ssl nginx-mod-luci nginx-ssl-util"
+    if opkg install nginx-ssl nginx-mod-luci nginx-ssl-util; then
+        return 0
+    fi
+    _migrate_log "nginx-ssl-util unavailable, installing nginx-ssl nginx-mod-luci"
+    opkg install nginx-ssl nginx-mod-luci
+}
+
+_luci_https_ok() {
+    url="https://127.0.0.1/cgi-bin/luci/"
+    if _would "check $url"; then
+        return 0
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        code=$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" || true)
+        case "$code" in
+            200|301|302|401|403) return 0 ;;
+        esac
+        return 1
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -O /dev/null --no-check-certificate --timeout=10 "$url"
+        return $?
+    fi
+    if command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch -q -T 10 -O /dev/null "$url"
+        return $?
+    fi
+    _migrate_log "no http client to check $url"
+    return 1
+}
+
 _backup_for_rollback() {
     stamp=$(date +%Y%m%d%H%M%S)
     mkdir -p "$BACKUP_ROOT/ipk"
@@ -351,16 +430,21 @@ _backup_for_rollback() {
         echo "$_tarball"
         return 0
     fi
-    tar czf "$_tarball" -C / etc/config
+    tar czf "$_tarball" -C "${LUCI_NGINX_ETC_ROOT:-/}" etc/config
     opkg list-installed > "$_installed"
     echo "$_tarball"
 }
 
 _download_rollback_ipks() {
+    if ! _ensure_opkg_lists; then
+        _migrate_log "opkg update failed; uhttpd was not removed"
+        return 1
+    fi
     if _would "opkg download uhttpd uhttpd-mod-ubus luci-light luci-ssl luci into $BACKUP_ROOT/ipk"; then
         return 0
     fi
     mkdir -p "$BACKUP_ROOT/ipk"
+    _migrate_log "opkg download rollback ipks"
     (
         cd "$BACKUP_ROOT/ipk" || exit 1
         opkg download uhttpd uhttpd-mod-ubus luci-light luci-ssl luci
@@ -379,7 +463,7 @@ _rollback_to_uhttpd() {
         opkg install "$BACKUP_ROOT"/ipk/*.ipk
     fi
     if [ -n "$tarball" ] && [ -f "$tarball" ]; then
-        tar xzf "$tarball" -C /
+        tar xzf "$tarball" -C "${LUCI_NGINX_ETC_ROOT:-/}"
     fi
     if [ -x "$INIT_D/uhttpd" ]; then
         "$INIT_D/uhttpd" enable 2>/dev/null || true
@@ -404,44 +488,63 @@ _nginx_test_and_restart() {
 }
 
 migrate_to_nginx() {
+    _migrate_log "backup /etc/config"
     tarball=$(_backup_for_rollback) || return 1
     if ! _download_rollback_ipks; then
-        echo "opkg download failed; uhttpd was not removed" >&2
+        _migrate_log "opkg download failed; uhttpd was not removed"
         return 1
     fi
     if _would "$INIT_D/uhttpd stop"; then
         echo "WOULD $INIT_D/uhttpd disable"
-        echo "WOULD opkg remove luci luci-ssl luci-light uhttpd-mod-ubus uhttpd"
-        echo "WOULD opkg install nginx-ssl nginx-mod-luci"
+        echo "WOULD opkg remove luci-light luci-ssl luci uhttpd-mod-ubus uhttpd"
+        echo "WOULD opkg install nginx-ssl nginx-mod-luci nginx-ssl-util"
         ensure_bondix_locations_include
         maybe_relax_restrict_locally
         disable_http_redirect
         echo "WOULD nginx -t after bondix locations include"
         _nginx_test_and_restart
+        echo "WOULD check https://127.0.0.1/cgi-bin/luci/"
         return 0
     fi
-    "$INIT_D/uhttpd" stop 2>/dev/null || true
-    "$INIT_D/uhttpd" disable 2>/dev/null || true
-    # No --autoremove: LuCI apps stay installed.
-    opkg remove luci luci-ssl luci-light uhttpd-mod-ubus uhttpd || {
-        _rollback_to_uhttpd "$tarball"
-        return 1
-    }
-    if ! opkg install nginx-ssl nginx-mod-luci; then
+    if [ -x "$INIT_D/uhttpd" ]; then
+        _migrate_log "stop uhttpd"
+        "$INIT_D/uhttpd" stop 2>/dev/null || true
+        "$INIT_D/uhttpd" disable 2>/dev/null || true
+    else
+        _migrate_log "uhttpd init absent"
+    fi
+    # No --autoremove: LuCI apps stay installed. luci-light first so it
+    # cannot conflict with luci-nginx.
+    if ! _remove_uhttpd_stack; then
+        _migrate_log "remove failed; rolling back"
         _rollback_to_uhttpd "$tarball"
         return 1
     fi
+    if ! _install_nginx_luci; then
+        _migrate_log "nginx install failed; rolling back"
+        _rollback_to_uhttpd "$tarball"
+        return 1
+    fi
+    _migrate_log "bondix locations include"
     ensure_bondix_locations_include
     include_added=$?
     maybe_relax_restrict_locally
+    _migrate_log "https-only (no _redirect2ssl, no listen 80)"
     disable_http_redirect || true
     if [ "$include_added" -eq 0 ]; then
         reload_nginx_after_include || true
     fi
     if ! _nginx_test_and_restart; then
+        _migrate_log "nginx -t or restart failed; rolling back"
         _rollback_to_uhttpd "$tarball"
         return 1
     fi
+    if ! _luci_https_ok; then
+        _migrate_log "https://127.0.0.1/cgi-bin/luci/ did not answer; rolling back"
+        _rollback_to_uhttpd "$tarball"
+        return 1
+    fi
+    _migrate_log "luci https ok"
     return 0
 }
 

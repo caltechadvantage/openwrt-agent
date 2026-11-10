@@ -10,13 +10,26 @@
 # are base-system, so update needs zero extra packages.
 
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-OPENWRT_DIR="/root/openwrt"
+OPENWRT_DIR="${OPENWRT_DIR:-/root/openwrt}"
 REPO="caltechadvantage/openwrt-agent"
+
+# The shell that is already running may be an older update.sh. As soon
+# as the new tree is in place, exec that tree's post-update instead of
+# reading the rest of the file we just overwrote.
+if [ "${1:-}" = "--post-update" ]; then
+    if [ "${UPDATE_SKIP_RESTART:-0}" != "1" ]; then
+        /etc/init.d/openwrt-main stop 2>/dev/null || true
+        sleep 1
+        killall python3 2>/dev/null || true
+        killall run_main.sh 2>/dev/null || true
+        /etc/init.d/openwrt-main start 2>/dev/null || true
+    fi
+    exec sh "$OPENWRT_DIR/scripts/post_update.sh"
+fi
 
 cd "$OPENWRT_DIR" || { echo -e "${RED}ERROR: $OPENWRT_DIR not found${NC}"; exit 1; }
 
@@ -55,66 +68,31 @@ echo -e "${CYAN}Current:${NC} ${current_version}"
 # install. No .git, so nothing to diverge or force-reset.
 echo -e "${GREEN}[1/4]${NC} Downloading code..."
 publish_status '{"update_status":"pulling"}'
-target="${1:-main}"
-url="https://codeload.github.com/$REPO/tar.gz/$target"
-
-tmp_tgz="/tmp/openwrt-agent-update.tar.gz"
-tmp_dir="/tmp/openwrt-agent-update"
-rm -rf "$tmp_tgz" "$tmp_dir"
-mkdir -p "$tmp_dir"
-uclient-fetch -q -T 60 -O "$tmp_tgz" "$url" || die "download_failed"
-tar xzf "$tmp_tgz" -C "$tmp_dir" || die "extract_failed"
-src="$(echo "$tmp_dir"/*/)"
-[ -d "$src" ] || die "extract_empty"
-cp -r "$src". "$OPENWRT_DIR/" || die "copy_failed"
-rm -rf "$tmp_tgz" "$tmp_dir"
-
-new_version="$( [ -f "$OPENWRT_DIR/VERSION" ] && cat "$OPENWRT_DIR/VERSION" || echo unknown )"
-echo -e "${CYAN}       Updated to: ${new_version}${NC}"
-
-# Step 2: Stop service and kill stale processes
-echo -e "${GREEN}[2/4]${NC} Stopping service..."
-publish_status '{"update_status":"restarting"}'
-/etc/init.d/openwrt-main stop 2>/dev/null
-sleep 2
-killall python3 2>/dev/null
-killall run_main.sh 2>/dev/null
-sleep 1
-
-if ps | grep "main.py" | grep -qv grep; then
-    echo -e "${YELLOW}WARNING: Process still running, force killing...${NC}"
-    killall -9 python3 2>/dev/null
-    sleep 1
-fi
-
-# Step 3: Start service
-echo -e "${GREEN}[3/4]${NC} Starting service..."
-/etc/init.d/openwrt-main start
-sleep 3
-
-# Step 4: Verify
-echo -e "${GREEN}[4/4]${NC} Verifying..."
-if ps | grep "main.py" | grep -qv grep; then
-    version="$new_version"
-    [ -z "$version" ] && version="unknown"
-    echo -e "${GREEN}OK${NC} - Service running (${version})"
-    echo -e "${CYAN}Logs:${NC} tail -f /var/log/openwrt.log"
-    publish_status "{\"update_status\":\"completed\",\"update_new_version\":\"${version}\"}"
-    if [ -f "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" ]; then
-        echo -e "${CYAN}LuCI:${NC} nginx check (uhttpd is not restarted when nginx is installed)"
-        sh "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" || \
-            echo -e "${YELLOW}WARNING: LuCI nginx step failed. Backup is under /root/backup-nginx${NC}"
-    fi
-    if [ -f "$OPENWRT_DIR/scripts/lib_ngrok_config.sh" ]; then
-        echo -e "${CYAN}ngrok:${NC} https-ui upstream https://localhost:443 (ngrok is not restarted)"
-        # shellcheck disable=SC1091
-        . "$OPENWRT_DIR/scripts/lib_ngrok_config.sh"
-        NGROK_CONFIG="/root/.config/ngrok/ngrok.yml" migrate_ngrok_luci_upstream || \
-            echo -e "${YELLOW}WARNING: ngrok LuCI upstream was not updated${NC}"
-    fi
+if [ -n "${UPDATE_SRC_DIR:-}" ]; then
+    src="$UPDATE_SRC_DIR"
 else
-    echo -e "${RED}ERROR: Service failed to start${NC}"
-    echo -e "${CYAN}Check:${NC} tail -f /var/log/openwrt.log"
-    publish_status '{"update_status":"failed","update_error":"service_start_failed"}'
-    exit 1
+    target="${1:-main}"
+    url="https://codeload.github.com/$REPO/tar.gz/$target"
+    tmp_tgz="/tmp/openwrt-agent-update.tar.gz"
+    tmp_dir="/tmp/openwrt-agent-update"
+    rm -rf "$tmp_tgz" "$tmp_dir"
+    mkdir -p "$tmp_dir"
+    uclient-fetch -q -T 60 -O "$tmp_tgz" "$url" || die "download_failed"
+    tar xzf "$tmp_tgz" -C "$tmp_dir" || die "extract_failed"
+    src="$(echo "$tmp_dir"/*/)"
+    rm -rf "$tmp_tgz"
 fi
+[ -d "$src" ] || die "extract_empty"
+src="${src%/}"
+cp -r "$src"/. "$OPENWRT_DIR/" || die "copy_failed"
+if [ -n "${tmp_dir:-}" ]; then
+    rm -rf "$tmp_dir"
+fi
+
+# Do not keep reading this file: the copy above may have replaced it.
+# The tree just installed finishes the restart and the migrations.
+if [ "${UPDATE_DRY_RUN:-0}" = "1" ]; then
+    echo "EXEC $OPENWRT_DIR/update.sh --post-update"
+    exit 0
+fi
+exec sh "$OPENWRT_DIR/update.sh" --post-update
