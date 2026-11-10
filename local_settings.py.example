@@ -60,9 +60,10 @@ TB_PROVISION_SECRET = "REPLACE_WITH_TENANT_SECRET"
 # WAN_PROBE_TARGET = "probe.example.com"
 
 # LuCI. False skips the uhttpd-to-nginx step. The second flag, when
-# true, removes nginx._lan.restrict_locally for LANs that use public IPs.
+# true, keeps OpenWrt's restrict_locally include (WAN clients get 403).
+# The default removes that include and keeps conf.d/*.locations.
 # LUCI_USE_NGINX = True
-# LUCI_NGINX_RELAX_RESTRICT_LOCALLY = False
+# LUCI_NGINX_KEEP_RESTRICT_LOCALLY = False
 
 # Ngrok auto-stop seconds. The dashboard's Start ngrok button always
 # arms an auto-shutdown so a tunnel left open after a debugging

@@ -34,9 +34,11 @@ WAN_PROBE_TARGET = None
 # firewall zones or Bondix configuration.
 LUCI_USE_NGINX = True
 
-# When true, delete nginx._lan.restrict_locally so a LAN that uses
-# public addresses can open LuCI. Default false: leave the package default.
-LUCI_NGINX_RELAX_RESTRICT_LOCALLY = False
+# OpenWrt's nginx._lan.include lists restrict_locally, which denies
+# every address outside the LAN and loopback. LuCI on nginx is reachable
+# from the WAN the way uhttpd was, so that include is removed.
+# Set this true to keep the stock deny-all rule.
+LUCI_NGINX_KEEP_RESTRICT_LOCALLY = False
 
 
 DEFAULT_CONFIG = {

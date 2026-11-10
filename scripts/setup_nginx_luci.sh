@@ -5,20 +5,23 @@
 # nginx-mod-luci, and `nginx -t -c` of the live config are already healthy.
 # On OpenWrt 24.10 that file is /etc/nginx/uci.conf. Plain `nginx -t` looks
 # for /etc/nginx/nginx.conf, which is not there, and must not be used.
-# Never starts uhttpd while nginx is installed. Never removes or reinstalls
-# packages when nginx is already serving LuCI. Never sets a firewall zone,
-# and never edits Bondix's own config. The only nginx change on an
-# already-healthy box is adding `conf.d/*.locations` to server `_lan` when
-# that include is missing, so /etc/nginx/conf.d/bondix.locations can load,
-# and removing OpenWrt's `_redirect2ssl` port-80 redirect so LuCI is
-# HTTPS on 443 only. Other servers are left alone. A box that still
-# runs uhttpd is not edited.
+# A box that already serves LuCI with nginx is not reinstalled. The only
+# edits then are adding `conf.d/*.locations` on `_lan` when it is missing,
+# removing `_redirect2ssl` so LuCI is HTTPS on 443 only, and removing
+# `restrict_locally`. A box still on uhttpd is migrated in place: packages
+# are installed while uhttpd keeps 443, uhttpd is stopped only so nginx
+# can bind, and uhttpd is removed only after https://127.0.0.1/cgi-bin/luci/
+# returns 200 or 302. Never sets a firewall zone, and never edits Bondix's
+# own config.
 #
 # Skip the whole step with LUCI_USE_NGINX=0 or LUCI_USE_NGINX = False in
 # settings.py / local_settings.py.
 #
-# LUCI_NGINX_RELAX_RESTRICT_LOCALLY=1 (default off) deletes
-# nginx._lan.restrict_locally. Some LANs use public addresses and need that.
+# OpenWrt's nginx-ssl-util adds `restrict_locally` to nginx._lan.include.
+# That file allows RFC1918 and 127.0.0.0/8, then `deny all`, so a WAN
+# client gets 403 "access forbidden by rule". uhttpd did not do that.
+# The include is removed by default. Set LUCI_NGINX_KEEP_RESTRICT_LOCALLY=1
+# to leave it. conf.d/*.locations stays.
 #
 # Source with SETUP_NGINX_LUCI_SOURCE_ONLY=1 to use the functions in tests.
 
@@ -148,8 +151,11 @@ luci_nginx_enabled() {
     return 0
 }
 
-luci_relax_restrict_locally() {
-    state=$(_apply_flag "${LUCI_NGINX_RELAX_RESTRICT_LOCALLY:-}")
+luci_keep_restrict_locally() {
+    # Default is to remove the include. Only an explicit on keeps it.
+    # The old LUCI_NGINX_RELAX_RESTRICT_LOCALLY flag is not consulted:
+    # settings.py used to set it false, which would have kept the 403.
+    state=$(_apply_flag "${LUCI_NGINX_KEEP_RESTRICT_LOCALLY:-}")
     if [ "$state" = "on" ]; then
         return 0
     fi
@@ -158,11 +164,17 @@ luci_relax_restrict_locally() {
     fi
     value=""
     for f in $(_settings_files); do
-        got=$(_py_assignment "$f" LUCI_NGINX_RELAX_RESTRICT_LOCALLY)
+        got=$(_py_assignment "$f" LUCI_NGINX_KEEP_RESTRICT_LOCALLY)
         [ -n "$got" ] && value="$got"
     done
     state=$(_apply_flag "$value")
     [ "$state" = "on" ]
+}
+
+_lan_include_has() {
+    needle="$1"
+    got=$(uci -q get nginx._lan.include 2>/dev/null || true)
+    printf '%s' "$got" | tr -d "'\"" | tr ' ' '\n' | grep -Fxq "$needle"
 }
 
 nginx_packages_installed() {
@@ -182,7 +194,9 @@ luci_plan() {
         echo skip
         return 0
     fi
-    if nginx_packages_installed; then
+    # uhttpd still installed means nginx is not the LuCI server yet, even
+    # if the nginx packages are already on disk from a partial run.
+    if nginx_packages_installed && ! _uhttpd_still_installed; then
         if nginx_luci_healthy; then
             echo leave
         else
@@ -237,13 +251,60 @@ reload_nginx_after_include() {
     nginx_test_config
 }
 
-maybe_relax_restrict_locally() {
-    luci_relax_restrict_locally || return 0
-    if _would uci delete nginx._lan.restrict_locally; then
+drop_restrict_locally() {
+    # Idempotent. Removes the include list entry, not a separate option.
+    # Keeps conf.d/*.locations. Backs up UCI first. Restores that backup
+    # if nginx -t or the reload fails. Does not start uhttpd.
+    if luci_keep_restrict_locally; then
+        _migrate_log "keeping restrict_locally (LUCI_NGINX_KEEP_RESTRICT_LOCALLY)"
         return 0
     fi
-    uci -q delete nginx._lan.restrict_locally
+    if ! _lan_include_has restrict_locally; then
+        _migrate_log "restrict_locally already absent; conf.d/*.locations kept"
+        return 0
+    fi
+    _migrate_log "remove nginx._lan.include restrict_locally; keep conf.d/*.locations"
+    if _would "uci del_list nginx._lan.include=restrict_locally"; then
+        echo "WOULD uci commit nginx"
+        echo "WOULD $INIT_D/nginx reload"
+        return 0
+    fi
+    saved=$(_backup_nginx_uci) || return 1
+    _migrate_log "backed up nginx uci to $saved"
+    uci -q del_list nginx._lan.include 'restrict_locally'
     uci commit nginx
+    if [ "${LUCI_NGINX_DEFER_RELOAD:-0}" = "1" ]; then
+        _migrate_log "restrict_locally removed from uci; nginx reload deferred until uhttpd releases 443"
+        if _lan_include_has 'conf.d/*.locations' || _lan_include_has 'conf.d/bondix.locations'; then
+            _migrate_log "conf.d locations include still present"
+        fi
+        return 0
+    fi
+    nginx_generate_conf
+    if ! nginx_test_config; then
+        _migrate_log "nginx -t failed after removing restrict_locally; restoring $saved"
+        _restore_nginx_uci "$saved" || true
+        return 1
+    fi
+    if [ -x "$INIT_D/nginx" ]; then
+        if ! "$INIT_D/nginx" reload; then
+            "$INIT_D/nginx" restart || {
+                _migrate_log "nginx reload failed; restoring $saved"
+                _restore_nginx_uci "$saved" || true
+                return 1
+            }
+        fi
+    fi
+    if ! nginx_test_config; then
+        _migrate_log "nginx -t failed after reload; restoring $saved"
+        _restore_nginx_uci "$saved" || true
+        return 1
+    fi
+    if _lan_include_has 'conf.d/*.locations' || _lan_include_has 'conf.d/bondix.locations'; then
+        _migrate_log "conf.d locations include still present"
+    fi
+    _migrate_log "restrict_locally removed"
+    return 0
 }
 
 # OpenWrt nginx-mod-luci adds server `_redirect2ssl`, which listens on
@@ -315,6 +376,11 @@ disable_http_redirect() {
         done
     fi
     uci commit nginx
+    if [ "${LUCI_NGINX_DEFER_RELOAD:-0}" = "1" ]; then
+        _migrate_log "https-only uci written; nginx start deferred until uhttpd releases 443"
+        echo "luci_http_redirect=removed"
+        return 0
+    fi
     nginx_generate_conf
     if ! nginx_test_config; then
         echo "nginx -t failed after removing the port 80 redirect; restoring nginx UCI from $saved" >&2
@@ -346,79 +412,145 @@ _migrate_log() {
     mkdir -p "$BACKUP_ROOT"
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)" "$*" >> "$BACKUP_ROOT/migrate.log"
     echo "$*"
-}
-
-_opkg_lists_fresh() {
-    lists="${OPKG_LISTS_DIR:-/var/opkg-lists}"
-    [ -d "$lists" ] || return 1
-    find "$lists" -type f -mtime -1 2>/dev/null | head -n 1 | grep -q .
-}
-
-_ensure_opkg_lists() {
-    if _opkg_lists_fresh; then
-        _migrate_log "opkg lists are fresh"
-        return 0
+    if command -v logger >/dev/null 2>&1; then
+        logger -t luci-nginx -- "$*" 2>/dev/null || true
     fi
-    _migrate_log "opkg update"
-    if _would "opkg update"; then
-        return 0
-    fi
-    opkg update
 }
 
 _pkg_installed() {
     opkg list-installed 2>/dev/null | grep -q "^$1 "
 }
 
-_remove_uhttpd_stack() {
-    rc=0
-    for pkg in luci-light luci-ssl luci uhttpd-mod-ubus uhttpd; do
-        if _pkg_installed "$pkg"; then
-            _migrate_log "opkg remove $pkg"
-            opkg remove "$pkg" || rc=1
-        else
-            _migrate_log "skip $pkg, not installed"
-        fi
-    done
-    return "$rc"
+_uhttpd_still_installed() {
+    _pkg_installed uhttpd && return 0
+    _pkg_installed uhttpd-mod-ubus && return 0
+    return 1
 }
 
-_install_nginx_luci() {
-    if opkg info luci-nginx >/dev/null 2>&1; then
-        _migrate_log "opkg install luci-nginx"
-        opkg install luci-nginx
-        return $?
-    fi
-    _migrate_log "opkg install nginx-ssl nginx-mod-luci nginx-ssl-util"
-    if opkg install nginx-ssl nginx-mod-luci nginx-ssl-util; then
+_install_if_missing() {
+    pkg="$1"
+    if _pkg_installed "$pkg"; then
+        _migrate_log "$pkg already installed"
         return 0
     fi
-    _migrate_log "nginx-ssl-util unavailable, installing nginx-ssl nginx-mod-luci"
-    opkg install nginx-ssl nginx-mod-luci
+    _migrate_log "opkg install $pkg"
+    if _would "opkg install $pkg"; then
+        return 0
+    fi
+    opkg install "$pkg"
 }
 
-_luci_https_ok() {
-    url="https://127.0.0.1/cgi-bin/luci/"
+_install_nginx_packages() {
+    # All four, while uhttpd is still the process on 443. opkg pulls deps
+    # (including nginx-ssl-util's certificate helper). Already installed
+    # is success. Any failure aborts before uhttpd is stopped.
+    _migrate_log "opkg install luci-nginx nginx-ssl nginx-mod-luci nginx-ssl-util"
+    for pkg in luci-nginx nginx-ssl nginx-mod-luci nginx-ssl-util; do
+        _install_if_missing "$pkg" || return 1
+    done
+    return 0
+}
+
+_install_default_packages() {
+    _migrate_log "opkg install iptables-nft ttyd luci-app-ttyd iputils-ping iputils-tracepath git-http iperf3 luci-lua-runtime luci-compat"
+    for pkg in iptables-nft ttyd luci-app-ttyd iputils-ping iputils-tracepath git-http iperf3 luci-lua-runtime luci-compat; do
+        _install_if_missing "$pkg" || return 1
+    done
+    return 0
+}
+
+_warn_expected_packages() {
+    for pkg in bondix-client-universal luci-app-ifspeedtest; do
+        if _pkg_installed "$pkg"; then
+            _migrate_log "$pkg is installed"
+        else
+            _migrate_log "warning: $pkg is not installed; leaving it alone"
+        fi
+    done
+}
+
+_http_code() {
+    url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -k -s -m 10 -o /dev/null -w "%{http_code}" "$url" || true
+        return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -S -O /dev/null --no-check-certificate -T 10 "$url" 2>&1 | \
+            sed -n 's/.*HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | tail -n 1
+        return 0
+    fi
+    if command -v uclient-fetch >/dev/null 2>&1; then
+        if uclient-fetch -q -T 10 -O /dev/null "$url"; then
+            echo 200
+        else
+            echo 000
+        fi
+        return 0
+    fi
+    echo none
+}
+
+_wan_facing_ip() {
+    ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.][0-9.]*\).*/\1/p' | head -n 1
+}
+
+_probe_luci_url() {
+    url="$1"
     if _would "check $url"; then
         return 0
     fi
-    if command -v curl >/dev/null 2>&1; then
-        code=$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" || true)
-        case "$code" in
-            200|301|302|401|403) return 0 ;;
-        esac
+    code=$(_http_code "$url")
+    code=$(printf '%s' "$code" | tr -cd '0-9')
+    [ -n "$code" ] || code="000"
+    _migrate_log "probe $url -> $code"
+    case "$code" in
+        200|301|302) return 0 ;;
+        403)
+            _migrate_log "$url returned 403 access forbidden by rule"
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_luci_https_ok() {
+    # 127.0.0.1 hits the same default_server WAN clients use when nginx
+    # listens on 443. 403 is the restrict_locally deny, so it is failure.
+    # A discovered WAN address is checked the same way when the packet
+    # actually gets an HTTP status; a hairpin miss does not by itself fail.
+    if ! luci_keep_restrict_locally && _lan_include_has restrict_locally; then
+        _migrate_log "restrict_locally still on nginx._lan; WAN clients get 403"
         return 1
     fi
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -O /dev/null --no-check-certificate --timeout=10 "$url"
-        return $?
+    url="https://127.0.0.1/cgi-bin/luci/"
+    if ! _probe_luci_url "$url"; then
+        return 1
     fi
-    if command -v uclient-fetch >/dev/null 2>&1; then
-        uclient-fetch -q -T 10 -O /dev/null "$url"
-        return $?
+    wan_ip=$(_wan_facing_ip)
+    case "$wan_ip" in
+        ""|127.0.0.1) return 0 ;;
+    esac
+    if _would "check https://$wan_ip/cgi-bin/luci/"; then
+        return 0
     fi
-    _migrate_log "no http client to check $url"
-    return 1
+    wan_code=$(_http_code "https://$wan_ip/cgi-bin/luci/")
+    wan_code=$(printf '%s' "$wan_code" | tr -cd '0-9')
+    [ -n "$wan_code" ] || wan_code="000"
+    _migrate_log "probe https://$wan_ip/cgi-bin/luci/ -> $wan_code"
+    case "$wan_code" in
+        200|301|302) return 0 ;;
+        403)
+            _migrate_log "WAN listener returned 403 access forbidden by rule"
+            return 1
+            ;;
+        *)
+            _migrate_log "WAN listener gave no 200/302 (code $wan_code); loopback status stands"
+            return 0
+            ;;
+    esac
 }
 
 _backup_for_rollback() {
@@ -435,113 +567,188 @@ _backup_for_rollback() {
     echo "$_tarball"
 }
 
-_download_rollback_ipks() {
-    if ! _ensure_opkg_lists; then
-        _migrate_log "opkg update failed; uhttpd was not removed"
-        return 1
-    fi
-    if _would "opkg download uhttpd uhttpd-mod-ubus luci-light luci-ssl luci into $BACKUP_ROOT/ipk"; then
+_restore_nginx_uci_stopped() {
+    # Put the UCI back without starting nginx. uhttpd is about to own 443.
+    saved="$1"
+    [ -n "$saved" ] && [ -f "$saved" ] || return 1
+    if _would "uci import nginx < $saved"; then
         return 0
     fi
-    mkdir -p "$BACKUP_ROOT/ipk"
-    _migrate_log "opkg download rollback ipks"
-    (
-        cd "$BACKUP_ROOT/ipk" || exit 1
-        opkg download uhttpd uhttpd-mod-ubus luci-light luci-ssl luci
-    )
+    uci import nginx < "$saved"
+    uci commit nginx
 }
 
-_rollback_to_uhttpd() {
-    tarball="$1"
-    echo "LuCI nginx step failed; restoring uhttpd from $BACKUP_ROOT" >&2
-    if _would "rollback uhttpd from $tarball"; then
+_uhttpd_answers_443() {
+    url="https://127.0.0.1:443/cgi-bin/luci/"
+    if _would "check $url"; then
         return 0
     fi
-    "$INIT_D/nginx" stop 2>/dev/null || true
-    "$INIT_D/nginx" disable 2>/dev/null || true
-    if [ -d "$BACKUP_ROOT/ipk" ]; then
-        opkg install "$BACKUP_ROOT"/ipk/*.ipk
+    code=$(_http_code "$url")
+    code=$(printf '%s' "$code" | tr -cd '0-9')
+    _migrate_log "uhttpd probe $url -> ${code:-000}"
+    case "$code" in
+        200|301|302|401|403) return 0 ;;
+    esac
+    return 1
+}
+
+_abort_back_to_uhttpd() {
+    saved="$1"
+    _migrate_log "rolling back; stopping nginx and starting uhttpd on 443"
+    if _would "$INIT_D/nginx stop"; then
+        echo "WOULD $INIT_D/uhttpd enable"
+        echo "WOULD $INIT_D/uhttpd start"
+        return 0
     fi
-    if [ -n "$tarball" ] && [ -f "$tarball" ]; then
-        tar xzf "$tarball" -C "${LUCI_NGINX_ETC_ROOT:-/}"
+    if [ -x "$INIT_D/nginx" ]; then
+        "$INIT_D/nginx" stop 2>/dev/null || true
+        "$INIT_D/nginx" disable 2>/dev/null || true
+    fi
+    if ! _restore_nginx_uci_stopped "$saved"; then
+        _migrate_log "nginx uci backup was not restored"
     fi
     if [ -x "$INIT_D/uhttpd" ]; then
         "$INIT_D/uhttpd" enable 2>/dev/null || true
         "$INIT_D/uhttpd" start 2>/dev/null || true
+    else
+        _migrate_log "uhttpd init absent; cannot start it"
+        return 1
     fi
+    if _uhttpd_answers_443; then
+        _migrate_log "uhttpd is answering on 443 again"
+        return 0
+    fi
+    _migrate_log "uhttpd did not answer on 443 after rollback"
+    return 1
 }
 
-_nginx_test_and_restart() {
-    # Same config detection as the already-healthy check. A failed test
-    # does not start nginx; the caller rolls back.
+_configure_nginx_uci() {
+    # UCI only. nginx is not started: uhttpd still holds 80 and 443.
+    _migrate_log "configure nginx uci (https only, bondix locations, no restrict_locally)"
+    LUCI_NGINX_DEFER_RELOAD=1
+    ensure_bondix_locations_include || true
+    if ! drop_restrict_locally; then
+        LUCI_NGINX_DEFER_RELOAD=0
+        return 1
+    fi
+    _migrate_log "https-only (no _redirect2ssl, no listen 80)"
+    disable_http_redirect || true
+    LUCI_NGINX_DEFER_RELOAD=0
+    return 0
+}
+
+_stop_uhttpd_for_cutover() {
+    if [ ! -x "$INIT_D/uhttpd" ]; then
+        _migrate_log "uhttpd init absent; not stopping it"
+        return 0
+    fi
+    _migrate_log "stop uhttpd so nginx can bind 443"
+    if _would "$INIT_D/uhttpd stop"; then
+        return 0
+    fi
+    "$INIT_D/uhttpd" stop
+}
+
+_start_nginx_after_uhttpd() {
+    nginx_generate_conf
     if ! nginx_test_config; then
+        _migrate_log "nginx -t failed"
         return 1
     fi
     if _would "$INIT_D/nginx enable"; then
-        echo "WOULD $INIT_D/nginx restart"
-        echo "WOULD nginx -t -c $(nginx_conf_in_use)"
+        echo "WOULD $INIT_D/nginx start"
         return 0
     fi
+    if [ ! -x "$INIT_D/nginx" ]; then
+        _migrate_log "nginx init absent"
+        return 1
+    fi
     "$INIT_D/nginx" enable || return 1
-    "$INIT_D/nginx" restart || return 1
-    nginx_test_config || return 1
+    if ! "$INIT_D/nginx" start; then
+        "$INIT_D/nginx" restart || return 1
+    fi
+    nginx_test_config
+}
+
+_retire_uhttpd() {
+    # Health check already passed. Disable, then remove the daemon.
+    # luci / luci-ssl depend on uhttpd, so those metapackages go first.
+    # No --autoremove: LuCI apps and luci-base stay.
+    _migrate_log "health check passed; disable and remove uhttpd"
+    if [ -x "$INIT_D/uhttpd" ]; then
+        if _would "$INIT_D/uhttpd disable"; then
+            echo "WOULD opkg remove uhttpd uhttpd-mod-ubus"
+            return 0
+        fi
+        "$INIT_D/uhttpd" disable 2>/dev/null || true
+    elif _would "$INIT_D/uhttpd disable"; then
+        echo "WOULD opkg remove uhttpd uhttpd-mod-ubus"
+        return 0
+    fi
+    for pkg in luci-light luci-ssl luci; do
+        if _pkg_installed "$pkg"; then
+            _migrate_log "opkg remove $pkg so uhttpd can be removed"
+            opkg remove "$pkg" || _migrate_log "warning: opkg remove $pkg failed"
+        fi
+    done
+    rc=0
+    for pkg in uhttpd-mod-ubus uhttpd; do
+        if _pkg_installed "$pkg"; then
+            _migrate_log "opkg remove $pkg"
+            opkg remove "$pkg" || rc=1
+        else
+            _migrate_log "$pkg already absent"
+        fi
+    done
+    return "$rc"
 }
 
 migrate_to_nginx() {
     _migrate_log "backup /etc/config"
-    tarball=$(_backup_for_rollback) || return 1
-    if ! _download_rollback_ipks; then
-        _migrate_log "opkg download failed; uhttpd was not removed"
+    _backup_for_rollback >/dev/null || return 1
+
+    _migrate_log "opkg update"
+    if _would "opkg update"; then
+        :
+    elif ! opkg update; then
+        _migrate_log "opkg update failed; uhttpd was left running and untouched; uhttpd was not removed"
         return 1
     fi
-    if _would "$INIT_D/uhttpd stop"; then
-        echo "WOULD $INIT_D/uhttpd disable"
-        echo "WOULD opkg remove luci-light luci-ssl luci uhttpd-mod-ubus uhttpd"
-        echo "WOULD opkg install nginx-ssl nginx-mod-luci nginx-ssl-util"
-        ensure_bondix_locations_include
-        maybe_relax_restrict_locally
-        disable_http_redirect
-        echo "WOULD nginx -t after bondix locations include"
-        _nginx_test_and_restart
-        echo "WOULD check https://127.0.0.1/cgi-bin/luci/"
-        return 0
-    fi
-    if [ -x "$INIT_D/uhttpd" ]; then
-        _migrate_log "stop uhttpd"
-        "$INIT_D/uhttpd" stop 2>/dev/null || true
-        "$INIT_D/uhttpd" disable 2>/dev/null || true
-    else
-        _migrate_log "uhttpd init absent"
-    fi
-    # No --autoremove: LuCI apps stay installed. luci-light first so it
-    # cannot conflict with luci-nginx.
-    if ! _remove_uhttpd_stack; then
-        _migrate_log "remove failed; rolling back"
-        _rollback_to_uhttpd "$tarball"
+
+    if ! _install_nginx_packages; then
+        _migrate_log "package install failed; uhttpd was left running and untouched; uhttpd was not removed"
         return 1
     fi
-    if ! _install_nginx_luci; then
-        _migrate_log "nginx install failed; rolling back"
-        _rollback_to_uhttpd "$tarball"
+    if ! _install_default_packages; then
+        _migrate_log "default package install failed; uhttpd was left running and untouched; uhttpd was not removed"
         return 1
     fi
-    _migrate_log "bondix locations include"
-    ensure_bondix_locations_include
-    include_added=$?
-    maybe_relax_restrict_locally
-    _migrate_log "https-only (no _redirect2ssl, no listen 80)"
-    disable_http_redirect || true
-    if [ "$include_added" -eq 0 ]; then
-        reload_nginx_after_include || true
+    _warn_expected_packages
+
+    saved=$(_backup_nginx_uci) || return 1
+    if ! _configure_nginx_uci; then
+        _migrate_log "nginx uci configure failed; uhttpd was not stopped; rolling back uci"
+        _restore_nginx_uci_stopped "$saved" || true
+        return 1
     fi
-    if ! _nginx_test_and_restart; then
-        _migrate_log "nginx -t or restart failed; rolling back"
-        _rollback_to_uhttpd "$tarball"
+
+    if ! _stop_uhttpd_for_cutover; then
+        _migrate_log "could not stop uhttpd; rolling back"
+        _abort_back_to_uhttpd "$saved" || true
+        return 1
+    fi
+    if ! _start_nginx_after_uhttpd; then
+        _migrate_log "nginx -t or start failed; rolling back to uhttpd"
+        _abort_back_to_uhttpd "$saved" || true
         return 1
     fi
     if ! _luci_https_ok; then
-        _migrate_log "https://127.0.0.1/cgi-bin/luci/ did not answer; rolling back"
-        _rollback_to_uhttpd "$tarball"
+        _migrate_log "LuCI HTTPS was not 200 or 302; rolling back to uhttpd"
+        _abort_back_to_uhttpd "$saved" || true
+        return 1
+    fi
+    if ! _retire_uhttpd; then
+        _migrate_log "nginx is serving LuCI but removing uhttpd failed; uhttpd was not started"
         return 1
     fi
     _migrate_log "luci https ok"
@@ -560,15 +767,28 @@ setup_nginx_luci_main() {
             return 1
             ;;
         leave)
+            # Already on nginx, including a box migrated by an older
+            # script that left restrict_locally in place. post_update.sh
+            # runs this path once per BUILD_SHA.
             ensure_bondix_locations_include
             include_added=$?
-            maybe_relax_restrict_locally
+            if ! drop_restrict_locally; then
+                return 1
+            fi
             disable_http_redirect
             redirect_rc=$?
             if [ "$include_added" -eq 0 ]; then
                 reload_nginx_after_include || redirect_rc=$?
             fi
-            return "$redirect_rc"
+            if [ "$redirect_rc" -ne 0 ]; then
+                return "$redirect_rc"
+            fi
+            if ! _luci_https_ok; then
+                _migrate_log "LuCI HTTPS was not 200 or 302; uhttpd was not started"
+                return 1
+            fi
+            _migrate_log "luci https ok"
+            return 0
             ;;
         migrate)
             migrate_to_nginx

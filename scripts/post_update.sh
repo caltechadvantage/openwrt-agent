@@ -50,14 +50,13 @@ fi
 log "start $sha"
 rc=0
 if [ -f "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" ]; then
-    log "nginx luci"
+    log "nginx luci (migrate, or drop restrict_locally when nginx is already installed)"
     sh "$OPENWRT_DIR/scripts/setup_nginx_luci.sh" >> "$LOG" 2>&1 || rc=$?
 else
     log "no setup_nginx_luci.sh"
 fi
 if [ "$rc" -ne 0 ]; then
-    log "nginx luci failed rc=$rc; stamp not written"
-    exit "$rc"
+    log "nginx luci failed rc=$rc; uhttpd was left on 443 if the cutover rolled back; continuing; stamp not written"
 fi
 if [ -f "$OPENWRT_DIR/scripts/lib_ngrok_config.sh" ]; then
     log "ngrok https-ui upstream"
@@ -65,6 +64,9 @@ if [ -f "$OPENWRT_DIR/scripts/lib_ngrok_config.sh" ]; then
     . "$OPENWRT_DIR/scripts/lib_ngrok_config.sh"
     NGROK_CONFIG="${NGROK_CONFIG:-/root/.config/ngrok/ngrok.yml}" migrate_ngrok_luci_upstream >> "$LOG" 2>&1 || \
         log "ngrok upstream migration failed; continuing"
+fi
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
 fi
 printf '%s\n' "$sha" > "$STAMP"
 log "done $sha"
