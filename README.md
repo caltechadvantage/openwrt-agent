@@ -143,15 +143,6 @@ ngrok start --all --config /root/.config/ngrok/ngrok.yml &
 tail -f /var/log/openwrt-main.log
 ```
 
-### Bondix watchdog
-
-Keeps ThingsBoard, DNS, NTP, and ngrok off `bondix0`, and can give the LAN a WAN path when the tunnel is down. It does not change the Bondix firewall zone. Config is `/etc/config/bondix-watchdog`. Set `option last_resort '0'` on a site that must stay fail-closed. Details and the Cube-Demo test plan are in `docs/bondix-watchdog.md`.
-
-```bash
-/etc/init.d/bondix-watchdog status
-logread -e bondix-watchdog
-```
-
 ## Uninstallation
 
 To remove all services:
@@ -353,6 +344,6 @@ For issues or questions:
 - Services automatically restart if they crash
 - All services use OpenWrt's procd init system
 - ngrok creates two tunnels: one for LuCI interface (https-ui) and one for ttyd web terminal
-- The https-ui endpoint connects to `https://localhost:443` for LuCI. ngrok 3.33 does not check nginx's self-signed certificate unless `--upstream-tls-verify` is passed, and these scripts do not pass it.
+- The https-ui endpoint connects to `https://localhost:443` for LuCI. ngrok 3.33 does not check the self-signed certificate unless `--upstream-tls-verify` is passed, and these scripts do not pass it. Telemetry `ttyd_url` is the ttyd endpoint URL from the same file.
 - The ttyd endpoint connects to the configured IP address (default: `172.16.16.1:7681`) for web terminal access
 

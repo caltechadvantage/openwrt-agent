@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 
 # Default values
 NGROK_BIN="/usr/bin/ngrok"
-NGROK_CONFIG="/root/.config/ngrok/ngrok.yml"
+NGROK_CONFIG="${NGROK_CONFIG:-/root/.config/ngrok/ngrok.yml}"
 # Ngrok account auth token. Supply via env (NGROK_AUTHTOKEN=<token>)
 # OR /etc/openwrt-agent.env (sourced below if present). Never tracked
 # in source.
@@ -58,22 +58,49 @@ check_root() {
     fi
 }
 
-# LuCI is nginx on 443. This does not start uhttpd or bind it to 0.0.0.0:80.
+script_dir() {
+    if [ -n "${SETUP_NGROK_DIR:-}" ]; then
+        printf '%s\n' "$SETUP_NGROK_DIR"
+        return 0
+    fi
+    CDPATH= cd "$(dirname "$0")" && pwd
+}
+
+# LuCI is nginx on 443. A box with no uhttpd must not fail the install.
 configure_web_ui() {
     print_step "Step 1: LuCI on nginx"
-    web_setup="$(CDPATH= cd "$(dirname "$0")" && pwd)/setup_nginx_luci.sh"
+    uhttpd_init="${UHTTPD_INIT:-/etc/init.d/uhttpd}"
+    if [ ! -x "$uhttpd_init" ]; then
+        print_info "uhttpd is not installed; not touching it"
+    fi
+    web_setup="$(script_dir)/setup_nginx_luci.sh"
     if [ ! -f "$web_setup" ]; then
-        print_error "Missing $web_setup"
-        return 1
+        print_warning "Missing $web_setup; continuing without the LuCI nginx step"
+        return 0
     fi
     sh "$web_setup"
     rc=$?
     if [ "$rc" -ne 0 ]; then
+        if [ ! -x "$uhttpd_init" ]; then
+            print_warning "LuCI nginx step returned ${rc}; uhttpd is absent so install continues"
+            return 0
+        fi
         print_error "LuCI nginx step failed"
         return 1
     fi
-    print_info "Starting dropbear SSH service..."
-    /etc/init.d/dropbear start 2>/dev/null || print_warning "dropbear may already be running"
+    if [ -x /etc/init.d/dropbear ]; then
+        print_info "Starting dropbear SSH service..."
+        /etc/init.d/dropbear start 2>/dev/null || print_warning "dropbear may already be running"
+    fi
+    return 0
+}
+
+ngrok_config_is_valid() {
+    [ -f "$NGROK_CONFIG" ] || return 1
+    grep -q 'REPLACE_WITH_NGROK_AUTHTOKEN' "$NGROK_CONFIG" && return 1
+    grep -q 'authtoken:' "$NGROK_CONFIG" || return 1
+    grep -q 'name:[[:space:]]*https-ui' "$NGROK_CONFIG" || return 1
+    grep -q 'name:[[:space:]]*ttyd' "$NGROK_CONFIG" || return 1
     return 0
 }
 
@@ -102,6 +129,11 @@ get_ngrok_config() {
     # Non-interactive mode pulls every value from the DTS_* env vars set by
     # the dashboard's claim-token install script - no prompts.
     if [ "${DTS_NON_INTERACTIVE:-0}" = "1" ]; then
+        if ngrok_config_is_valid; then
+            print_info "Keeping existing ngrok.yml"
+            KEEP_EXISTING_NGROK=1
+            return 0
+        fi
         NGROK_URL_PREFIX="${DTS_NGROK_PREFIX:-}"
         TTYD_URL_SUFFIX="${DTS_TTYD_SUFFIX:--shell}"
         TTYD_UPSTREAM_IP="${DTS_TTYD_HOST:-}"
@@ -249,9 +281,14 @@ create_ngrok_config() {
         fi
     fi
     
-    print_info "Writing ngrok configuration file at $NGROK_CONFIG (existing file is backed up first)..."
     # shellcheck disable=SC1091
-    . "$(CDPATH= cd "$(dirname "$0")" && pwd)/lib_ngrok_config.sh"
+    . "$(script_dir)/lib_ngrok_config.sh"
+    if [ "${KEEP_EXISTING_NGROK:-0}" = "1" ]; then
+        print_info "Existing ngrok.yml kept; updating the LuCI upstream only if needed"
+        migrate_ngrok_luci_upstream
+        return 0
+    fi
+    print_info "Writing ngrok configuration file at $NGROK_CONFIG (existing file is backed up first)..."
     write_ngrok_config
     if [ $? -eq 0 ]; then
         print_success "ngrok configuration file created successfully"
@@ -306,6 +343,7 @@ main() {
     echo ""
 }
 
-# Run main function
-main
+if [ "${SETUP_NGROK_SOURCE_ONLY:-0}" != "1" ]; then
+    main
+fi
 

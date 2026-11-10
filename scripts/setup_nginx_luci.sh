@@ -203,14 +203,38 @@ _would() {
 
 ensure_bondix_locations_include() {
     # Additive only. Does not delete or rewrite other nginx options.
+    # Returns 0 when the include was added, 1 when it was already there.
     includes=$(uci -q get nginx._lan.include 2>/dev/null || true)
-    echo "$includes" | grep -q 'conf.d/\*\.locations' && return 0
-    echo "$includes" | grep -q 'conf.d/bondix.locations' && return 0
+    echo "$includes" | grep -q 'conf.d/\*\.locations' && return 1
+    echo "$includes" | grep -q 'conf.d/bondix.locations' && return 1
     if _would uci add_list nginx._lan.include='conf.d/*.locations'; then
         return 0
     fi
     uci add_list nginx._lan.include='conf.d/*.locations'
     uci commit nginx
+    return 0
+}
+
+reload_nginx_after_include() {
+    # The locations include is already committed. Prove the config and
+    # reload so Bondix pages are served without waiting for another edit.
+    if [ "${LUCI_NGINX_DRY_RUN:-0}" = "1" ]; then
+        echo "WOULD nginx -t after bondix locations include"
+        echo "WOULD $INIT_D/nginx reload"
+        return 0
+    fi
+    nginx_generate_conf
+    if ! nginx_test_config; then
+        echo "nginx -t failed after adding conf.d/*.locations; removing that include" >&2
+        uci -q del_list nginx._lan.include='conf.d/*.locations'
+        uci commit nginx
+        nginx_generate_conf
+        return 1
+    fi
+    if [ -x "$INIT_D/nginx" ]; then
+        "$INIT_D/nginx" reload || "$INIT_D/nginx" restart || return 1
+    fi
+    nginx_test_config
 }
 
 maybe_relax_restrict_locally() {
@@ -236,7 +260,7 @@ _lan_has_plain_80() {
     listens=$(printf '%s' "$listens" | tr -d "'\"")
     for item in $listens; do
         case "$item" in
-            80|[::]:80|0.0.0.0:80|*:80) return 0 ;;
+            80|'[::]:80'|'0.0.0.0:80'|'*:80') return 0 ;;
         esac
     done
     return 1
@@ -392,6 +416,7 @@ migrate_to_nginx() {
         ensure_bondix_locations_include
         maybe_relax_restrict_locally
         disable_http_redirect
+        echo "WOULD nginx -t after bondix locations include"
         _nginx_test_and_restart
         return 0
     fi
@@ -407,8 +432,12 @@ migrate_to_nginx() {
         return 1
     fi
     ensure_bondix_locations_include
+    include_added=$?
     maybe_relax_restrict_locally
     disable_http_redirect || true
+    if [ "$include_added" -eq 0 ]; then
+        reload_nginx_after_include || true
+    fi
     if ! _nginx_test_and_restart; then
         _rollback_to_uhttpd "$tarball"
         return 1
@@ -429,9 +458,14 @@ setup_nginx_luci_main() {
             ;;
         leave)
             ensure_bondix_locations_include
+            include_added=$?
             maybe_relax_restrict_locally
             disable_http_redirect
-            return $?
+            redirect_rc=$?
+            if [ "$include_added" -eq 0 ]; then
+                reload_nginx_after_include || redirect_rc=$?
+            fi
+            return "$redirect_rc"
             ;;
         migrate)
             migrate_to_nginx

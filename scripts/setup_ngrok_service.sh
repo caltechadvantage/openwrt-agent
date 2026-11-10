@@ -58,12 +58,24 @@ check_root() {
     fi
 }
 
-# LuCI is nginx on 443. This does not start uhttpd or bind it to 0.0.0.0:80.
+# LuCI is nginx on 443. A missing uhttpd init script must not fail setup.
 configure_web_ui() {
     print_step "Step 1: LuCI on nginx"
+    if [ ! -x /etc/init.d/uhttpd ]; then
+        print_info "uhttpd is not installed; not touching it"
+    fi
     web_setup="$(CDPATH= cd "$(dirname "$0")" && pwd)/setup_nginx_luci.sh"
-    sh "$web_setup" || return 1
-    return 0
+    if [ ! -f "$web_setup" ]; then
+        print_warning "Missing $web_setup; continuing without the LuCI nginx step"
+        return 0
+    fi
+    sh "$web_setup"
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ ! -x /etc/init.d/uhttpd ]; then
+        print_warning "LuCI nginx step returned ${rc}; uhttpd is absent so install continues"
+        return 0
+    fi
+    return "$rc"
 }
 
 # Get br-lan interface IP address

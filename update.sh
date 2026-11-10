@@ -112,11 +112,6 @@ if ps | grep "main.py" | grep -qv grep; then
         NGROK_CONFIG="/root/.config/ngrok/ngrok.yml" migrate_ngrok_luci_upstream || \
             echo -e "${YELLOW}WARNING: ngrok LuCI upstream was not updated${NC}"
     fi
-    if [ -f "$OPENWRT_DIR/scripts/setup_bondix_watchdog.sh" ]; then
-        echo -e "${CYAN}Watchdog:${NC} bondix-watchdog (keeps an existing UCI file)"
-        sh "$OPENWRT_DIR/scripts/setup_bondix_watchdog.sh" || \
-            echo -e "${YELLOW}WARNING: Bondix watchdog install failed${NC}"
-    fi
 else
     echo -e "${RED}ERROR: Service failed to start${NC}"
     echo -e "${CYAN}Check:${NC} tail -f /var/log/openwrt.log"
